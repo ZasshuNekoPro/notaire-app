@@ -1,0 +1,16 @@
+.env
+.env.local
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.next/
+build/
+data/dvf/*.csv.gz
+data/dvf/*.parquet
+data/documents/
+.vscode/
+.idea/
+.DS_Store
+*.log

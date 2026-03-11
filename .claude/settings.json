@@ -1,0 +1,31 @@
+{
+  "model": "claude-sonnet-4-20250514",
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(pip install *)",
+      "Bash(docker compose *)",
+      "Bash(docker exec *)",
+      "Bash(pytest *)",
+      "Bash(alembic *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Edit(packages/**)",
+      "Edit(scripts/**)",
+      "Edit(.claude/**)",
+      "Edit(docs/**)",
+      "Read(**)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(curl * | bash)",
+      "Bash(wget * | sh)"
+    ]
+  },
+  "outputStyle": "explanatory",
+  "plansDirectory": ".claude/plans",
+  "autoCompact": true,
+  "compactThreshold": 0.5
+}
