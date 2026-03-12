@@ -1,0 +1,40 @@
+# ============================================================
+# NOTAIRE APP API — Dépendances Python
+# ============================================================
+
+# Framework API
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+
+# Base de données async
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+alembic==1.13.2
+
+# Validation et sérialisation
+pydantic[email]==2.9.0
+
+# Sécurité et authentification
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+pyotp==2.9.0
+
+# Cache et sessions
+redis==5.0.8
+aioredis==2.0.1
+
+# Configuration
+python-dotenv==1.0.1
+
+# Utilitaires
+httpx==0.27.0
+python-dateutil==2.9.0
+
+# Tests
+pytest==8.3.0
+pytest-asyncio==0.24.0
+pytest-mock==3.14.0
+
+# Monitoring (optionnel)
+sentry-sdk[fastapi]==2.14.0
