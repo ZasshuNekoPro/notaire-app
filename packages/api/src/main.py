@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 import redis.asyncio as redis
 
 from .models.base import Base
-from .routers import auth, users
+from .routers import auth, users, estimations
 
 
 # ============================================================
@@ -212,6 +212,11 @@ users.router.dependency_overrides.update({
     "get_db": get_db
 })
 
+estimations.router.dependency_overrides.update({
+    "get_db": get_db,
+    "get_redis": get_redis
+})
+
 # Enregistrement des routers
 app.include_router(
     auth.router,
@@ -225,8 +230,13 @@ app.include_router(
     tags=["Gestion des utilisateurs"]
 )
 
+app.include_router(
+    estimations.router,
+    prefix="/estimations",
+    tags=["Estimation immobilière"]
+)
+
 # TODO: Ajouter d'autres routers quand ils seront implémentés
-# app.include_router(estimations.router, prefix="/estimations", tags=["Estimation"])
 # app.include_router(dossiers.router, prefix="/dossiers", tags=["Dossiers"])
 # app.include_router(successions.router, prefix="/successions", tags=["Succession"])
 # app.include_router(juridique.router, prefix="/juridique", tags=["RAG Juridique"])
@@ -252,6 +262,7 @@ async def root():
         "endpoints": {
             "auth": "/auth/",
             "users": "/users/",
+            "estimations": "/estimations/",
             "docs": "/docs",
             "health": "/health"
         },

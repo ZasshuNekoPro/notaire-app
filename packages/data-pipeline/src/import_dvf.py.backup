@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""
+Pipeline d'import DVF pour l'estimation immobilière notariale.
+Étapes : téléchargement → normalisation → bulk insert → géocodage BAN.
+"""
+import asyncio
+import argparse
+import logging
+from pathlib import Path
+from typing import Optional, List, Tuple
+from datetime import datetime, timedelta
+import tempfile
+import gzip
+import time
+
+import pandas as pd
+import asyncpg
+import aiohttp
+from urllib.parse import quote_plus
+
+# Configuration logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Configuration DVF
+DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv"
+BAN_API_URL = "https://api-adresse.data.gouv.fr/search"
+BAN_BATCH_SIZE = 50
+BAN_RATE_LIMIT_DELAY = 0.5  # 500ms entre batches
+
+# Mapping des colonnes DVF vers notre schéma
+COLUMNS_MAP = {
+    "date_mutation": "date_vente",
+    "valeur_fonciere": "prix_vente",
+    "code_postal": "code_postal",
+    "nom_commune": "commune",
+    "code_departement": "departement",
+    "type_local": "type_bien",
+    "surface_reelle_bati": "surface_m2",
+    "nombre_pieces_principales": "nb_pieces",
+    "surface_terrain": "surface_terrain_m2",
+    "longitude": "longitude",
+    "latitude": "latitude",
+    "nature_mutation": "nature_mutation",
+    "adresse_numero": "numero_voie",
+    "adresse_suffixe": "suffixe_voie",
+    "adresse_nom_voie": "nom_voie",
+}
+
+# Filtres de qualité DVF
+VALID_NATURE_MUTATIONS = ["Vente"]
+VALID_TYPE_BIENS = [
+    "Appartement",
+    "Maison",
+    "Local industriel. commercial ou assimilé",
+    "Dépendance"
+]
+MIN_PRIX_VENTE = 1000  # €
+MIN_SURFACE_M2 = 5     # m²
+MIN_PRIX_M2 = 100      # €/m²
+MAX_PRIX_M2 = 50000    # €/m²
+
+
+async def download_dvf(departement: str, session: aiohttp.ClientSession) -> Path:
+    """Télécharge le fichier DVF pour un département donné."""
+    url = f"{DVF_BASE_URL}/{departement}.csv.gz"
+
+    logger.info(f"Téléchargement DVF pour le département {departement}...")
+
+    async with session.get(url) as response:
+        if response.status != 200:
+            raise ValueError(f"Échec téléchargement DVF {departement}: {response.status}")
+
+        # Créer fichier temporaire
+        temp_file = Path(tempfile.mktemp(suffix=f"_dvf_{departement}.csv.gz"))
+
+        with open(temp_file, 'wb') as f:
+            async for chunk in response.content.iter_chunked(8192):
+                f.write(chunk)
+
+    logger.info(f"DVF {departement} téléchargé: {temp_file}")
+    return temp_file
+
+
+def normalize_dvf(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise les données DVF : mapping colonnes + filtres qualité.
+
+    Args:
+        df: DataFrame DVF brut
+
+    Returns:
+        DataFrame normalisé et filtré
+    """
+    logger.info(f"Normalisation de {len(df)} transactions DVF...")
+
+    # Mapping des colonnes
+    available_cols = {k: v for k, v in COLUMNS_MAP.items() if k in df.columns}
+    df_clean = df[list(available_cols.keys())].rename(columns=available_cols)
+
+    # Conversion des types
+    if 'prix_vente' in df_clean.columns:
+        df_clean['prix_vente'] = pd.to_numeric(df_clean['prix_vente'], errors='coerce')
+
+    if 'surface_m2' in df_clean.columns:
+        df_clean['surface_m2'] = pd.to_numeric(df_clean['surface_m2'], errors='coerce')
+
+    if 'nb_pieces' in df_clean.columns:
+        df_clean['nb_pieces'] = pd.to_numeric(df_clean['nb_pieces'], errors='coerce')
+
+    if 'surface_terrain_m2' in df_clean.columns:
+        df_clean['surface_terrain_m2'] = pd.to_numeric(df_clean['surface_terrain_m2'], errors='coerce')
+
+    if 'date_vente' in df_clean.columns:
+        df_clean['date_vente'] = pd.to_datetime(df_clean['date_vente'], errors='coerce')
+
+    # Filtres de qualité
+    initial_count = len(df_clean)
+
+    # 1. Nature mutation = "Vente" uniquement
+    if 'nature_mutation' in df_clean.columns:
+        df_clean = df_clean[df_clean['nature_mutation'].isin(VALID_NATURE_MUTATIONS)]
+
+    # 2. Type de bien valide
+    if 'type_bien' in df_clean.columns:
+        df_clean = df_clean[df_clean['type_bien'].isin(VALID_TYPE_BIENS)]
+
+    # 3. Prix > seuil minimum
+    if 'prix_vente' in df_clean.columns:
+        df_clean = df_clean[
+            (df_clean['prix_vente'] > MIN_PRIX_VENTE) &
+            (df_clean['prix_vente'].notna())
+        ]
+
+    # 4. Surface > seuil minimum
+    if 'surface_m2' in df_clean.columns:
+        df_clean = df_clean[
+            (df_clean['surface_m2'] > MIN_SURFACE_M2) &
+            (df_clean['surface_m2'].notna())
+        ]
+
+    # 5. Prix au m² dans la fourchette acceptable
+    if 'prix_vente' in df_clean.columns and 'surface_m2' in df_clean.columns:
+        df_clean['prix_m2'] = df_clean['prix_vente'] / df_clean['surface_m2']
+        df_clean = df_clean[
+            (df_clean['prix_m2'] >= MIN_PRIX_M2) &
+            (df_clean['prix_m2'] <= MAX_PRIX_M2)
+        ]
+
+    # Supprimer les colonnes temporaires
+    if 'prix_m2' in df_clean.columns:
+        df_clean = df_clean.drop(columns=['prix_m2'])
+
+    # Ajouter métadonnées
+    df_clean['created_at'] = datetime.utcnow()
+    df_clean['source'] = 'DVF'
+
+    final_count = len(df_clean)
+    rejected_count = initial_count - final_count
+
+    logger.info(f"Normalisation terminée: {final_count} transactions conservées "
+                f"({rejected_count} rejetées, {final_count/initial_count*100:.1f}% retention)")
+
+    return df_clean
+
+
+async def load_to_postgres(df: pd.DataFrame, conn: asyncpg.Connection, departement: str) -> None:
+    """
+    Charge les données DVF en base via COPY (bulk insert optimisé).
+
+    Args:
+        df: DataFrame normalisé
+        conn: Connexion asyncpg
+        departement: Code département pour les logs
+    """
+    if len(df) == 0:
+        logger.warning("Aucune transaction à charger")
+        return
+
+    logger.info(f"Chargement de {len(df)} transactions en base...")
+
+    # Début de transaction
+    async with conn.transaction():
+        try:
+            # Préparer les données pour COPY
+            # asyncpg attend une liste de tuples dans l'ordre des colonnes
+            columns = list(df.columns)
+            records = []
+
+            for _, row in df.iterrows():
+                record = []
+                for col in columns:
+                    value = row[col]
+                    # Gestion des valeurs NaN/None
+                    if pd.isna(value):
+                        record.append(None)
+                    elif isinstance(value, pd.Timestamp):
+                        record.append(value.to_pydatetime())
+                    else:
+                        record.append(value)
+                records.append(tuple(record))
+
+            # Bulk insert via COPY
+            await conn.copy_records_to_table(
+                'transactions',
+                records=records,
+                columns=columns
+            )
+
+            # Enregistrer dans pipeline_runs
+            await conn.execute("""
+                INSERT INTO pipeline_runs (
+                    pipeline_name,
+                    status,
+                    started_at,
+                    completed_at,
+                    records_processed,
+                    metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+                'dvf_import',
+                'completed',
+                datetime.utcnow() - timedelta(seconds=30),  # Estimation début
+                datetime.utcnow(),
+                len(df),
+                {
+                    'departement': departement,
+                    'source': 'DVF',
+                    'filters_applied': True,
+                    'columns_mapped': len(COLUMNS_MAP)
+                }
+            )
+
+            logger.info(f"✅ {len(df)} transactions chargées avec succès")
+
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement: {e}")
+            raise
+
+
+async def geocode_transactions(conn: asyncpg.Connection, limit: Optional[int] = None) -> None:
+    """
+    Géocode les transactions sans coordonnées via l'API BAN.
+    Traite par batches de 50 avec rate limiting.
+
+    Args:
+        conn: Connexion asyncpg
+        limit: Nombre max de transactions à géocoder (pour tests)
+    """
+    logger.info("Démarrage du géocodage des transactions...")
+
+    # Récupérer les transactions sans coordonnées
+    query = """
+        SELECT id, numero_voie, nom_voie, code_postal, commune
+        FROM transactions
+        WHERE (longitude IS NULL OR latitude IS NULL)
+        AND numero_voie IS NOT NULL
+        AND nom_voie IS NOT NULL
+        AND code_postal IS NOT NULL
+    """
+
+    if limit:
+        query += f" LIMIT {limit}"
+
+    rows = await conn.fetch(query)
+
+    if not rows:
+        logger.info("Aucune transaction à géocoder")
+        return
+
+    logger.info(f"Géocodage de {len(rows)} transactions...")
+
+    # Traiter par batches
+    async with aiohttp.ClientSession() as session:
+        for i in range(0, len(rows), BAN_BATCH_SIZE):
+            batch = rows[i:i + BAN_BATCH_SIZE]
+            await _geocode_batch(conn, session, batch)
+
+            # Rate limiting entre batches
+            if i + BAN_BATCH_SIZE < len(rows):
+                await asyncio.sleep(BAN_RATE_LIMIT_DELAY)
+
+    logger.info("✅ Géocodage terminé")
+
+
+async def _geocode_batch(
+    conn: asyncpg.Connection,
+    session: aiohttp.ClientSession,
+    batch: List[asyncpg.Record]
+) -> None:
+    """Géocode un batch de transactions."""
+
+    # Construire les requêtes d'adresse
+    geocode_tasks = []
+    for row in batch:
+        address = _build_address(row)
+        if address:
+            geocode_tasks.append(_geocode_address(session, row['id'], address))
+
+    if not geocode_tasks:
+        return
+
+    # Exécuter les requêtes en parallèle
+    results = await asyncio.gather(*geocode_tasks, return_exceptions=True)
+
+    # Mettre à jour en base
+    updates = []
+    for result in results:
+        if isinstance(result, dict) and 'id' in result:
+            updates.append((result['longitude'], result['latitude'], result['id']))
+
+    if updates:
+        await conn.executemany(
+            "UPDATE transactions SET longitude = $1, latitude = $2 WHERE id = $3",
+            updates
+        )
+        logger.debug(f"Géocodé {len(updates)}/{len(batch)} transactions du batch")
+
+
+def _build_address(row: asyncpg.Record) -> Optional[str]:
+    """Construit une adresse pour l'API BAN."""
+    parts = []
+
+    if row['numero_voie']:
+        parts.append(str(row['numero_voie']))
+
+    if row['nom_voie']:
+        parts.append(row['nom_voie'])
+
+    if row['code_postal']:
+        parts.append(str(row['code_postal']))
+
+    if row['commune']:
+        parts.append(row['commune'])
+
+    return ' '.join(parts) if parts else None
+
+
+async def _geocode_address(
+    session: aiohttp.ClientSession,
+    transaction_id: str,
+    address: str
+) -> dict:
+    """Géocode une adresse via l'API BAN."""
+
+    try:
+        url = f"{BAN_API_URL}?q={quote_plus(address)}&limit=1"
+
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status != 200:
+                return {'id': transaction_id, 'longitude': None, 'latitude': None}
+
+            data = await response.json()
+
+            if data.get('features'):
+                coords = data['features'][0]['geometry']['coordinates']
+                return {
+                    'id': transaction_id,
+                    'longitude': coords[0],  # longitude en premier dans GeoJSON
+                    'latitude': coords[1]
+                }
+
+    except Exception as e:
+        logger.debug(f"Erreur géocodage transaction {transaction_id}: {e}")
+
+    return {'id': transaction_id, 'longitude': None, 'latitude': None}
+
+
+async def main(departement: str, geocode: bool = True, limit: Optional[int] = None) -> None:
+    """
+    Pipeline complet d'import DVF.
+
+    Args:
+        departement: Code département (ex: "75")
+        geocode: Activer le géocodage BAN
+        limit: Limiter le nombre de lignes à traiter (pour tests)
+    """
+    start_time = time.time()
+
+    logger.info(f"🚀 Démarrage import DVF département {departement}")
+
+    # Connexion base de données
+    conn = await asyncpg.connect(
+        host='localhost',
+        port=5432,
+        user='notaire',
+        password='notaire_secure_2024',
+        database='notaire_app'
+    )
+
+    temp_file = None
+
+    try:
+        # 1. Téléchargement
+        async with aiohttp.ClientSession() as session:
+            temp_file = await download_dvf(departement, session)
+
+        # 2. Lecture et normalisation
+        with gzip.open(temp_file, 'rt', encoding='utf-8') as f:
+            df = pd.read_csv(f, low_memory=False)
+
+            if limit:
+                df = df.head(limit)
+                logger.info(f"Limite appliquée: traitement de {len(df)} lignes")
+
+        df_clean = normalize_dvf(df)
+
+        if len(df_clean) == 0:
+            logger.warning("Aucune transaction valide après filtres")
+            return
+
+        # 3. Chargement en base
+        await load_to_postgres(df_clean, conn, departement)
+
+        # 4. Géocodage (optionnel)
+        if geocode:
+            await geocode_transactions(conn, limit=limit)
+
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Import DVF {departement} terminé en {elapsed:.1f}s")
+
+    except Exception as e:
+        logger.error(f"❌ Échec import DVF {departement}: {e}")
+        raise
+
+    finally:
+        await conn.close()
+
+        # Nettoyage fichier temporaire
+        if temp_file and temp_file.exists():
+            temp_file.unlink()
+            logger.debug(f"Fichier temporaire supprimé: {temp_file}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Import DVF pour estimation immobilière")
+    parser.add_argument("--dept", required=True, help="Code département (ex: 75)")
+    parser.add_argument("--no-geocode", action="store_true", help="Désactiver le géocodage BAN")
+    parser.add_argument("--limit", type=int, help="Limiter le nombre de lignes (tests)")
+
+    args = parser.parse_args()
+
+    asyncio.run(main(
+        departement=args.dept,
+        geocode=not args.no_geocode,
+        limit=args.limit
+    ))
