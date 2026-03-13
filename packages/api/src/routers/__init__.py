@@ -1,7 +1,7 @@
 """
 Routers FastAPI pour l'API notaire-app
 """
-from . import auth, users, estimations, successions, veille, notifications, alertes
+from . import auth, users, estimations, successions, veille, notifications, alertes, signatures
 
 __all__ = [
     "auth",
@@ -11,4 +11,5 @@ __all__ = [
     "veille",
     "notifications",
     "alertes",
+    "signatures",
 ]

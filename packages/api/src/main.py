@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 import redis.asyncio as redis
 
 from .models.base import Base
-from .routers import auth, users, estimations, successions, veille, notifications, alertes
+from .routers import auth, users, estimations, successions, veille, notifications, alertes, signatures
 from .scheduler import demarrer_scheduler_veille, arreter_scheduler_veille
 
 
@@ -247,6 +247,10 @@ alertes.router.dependency_overrides.update({
     "get_db": get_db
 })
 
+signatures.router.dependency_overrides.update({
+    "get_db": get_db
+})
+
 # Enregistrement des routers
 app.include_router(
     auth.router,
@@ -289,6 +293,12 @@ app.include_router(
     tags=["Alertes temps réel"]
 )
 
+app.include_router(
+    signatures.router,
+    prefix="/signatures",
+    tags=["Signature électronique"]
+)
+
 # TODO: Ajouter d'autres routers quand ils seront implémentés
 # app.include_router(dossiers.router, prefix="/dossiers", tags=["Dossiers"])
 # app.include_router(juridique.router, prefix="/juridique", tags=["RAG Juridique"])
@@ -317,6 +327,7 @@ async def root():
             "successions": "/successions/",
             "veille": "/veille/",
             "alertes": "/alertes/",
+            "signatures": "/signatures/",
             "websocket": "/ws/notifications",
             "docs": "/docs",
             "health": "/health"
@@ -327,6 +338,7 @@ async def root():
             "Estimation immobilière DVF",
             "Calculs de succession",
             "RAG juridique",
-            "Alertes légales"
+            "Alertes légales",
+            "Signature électronique"
         ]
     }
