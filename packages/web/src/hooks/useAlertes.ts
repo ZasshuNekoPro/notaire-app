@@ -1,20 +1,24 @@
 /**
- * Hook React pour la gestion des alertes et notifications temps réel.
- * Connexion WebSocket automatique + gestion état alertes + notifications toast.
+ * Hook personnalisé pour la gestion des alertes avec WebSocket temps réel.
+ * Logique métier : listing, filtrage, WebSocket, notifications.
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { toast } from 'react-toastify'
+'use client'
 
-// Types
-interface Alerte {
-  id: string
-  titre: string
-  niveau_impact: 'info' | 'faible' | 'moyen' | 'fort' | 'critique'
-  statut: 'nouvelle' | 'en_cours' | 'traitee' | 'archivee'
-  contenu: string
-  dossier_id?: string
-  created_at: string
-  lue: boolean
+import { useState, useEffect, useCallback, useRef } from 'react'
+import apiClient, { AlerteItem } from '@/lib/api-client'
+import { useToast } from '@/components/ui/Toast'
+
+interface AlerteFilters {
+  niveau_impact?: string
+  type?: string
+  non_lues_seulement?: boolean
+}
+
+interface AlertesStats {
+  total_alertes: number
+  non_lues: number
+  critiques_actives: number
+  par_impact: Record<string, number>
 }
 
 interface NotificationMessage {
@@ -27,17 +31,9 @@ interface NotificationMessage {
   details?: Record<string, any>
 }
 
-interface AlertesStats {
-  total_alertes: number
-  non_lues: number
-  critiques_actives: number
-  par_impact: Record<string, number>
-  derniere_alerte?: Alerte
-}
-
 interface UseAlertesReturn {
   // État des alertes
-  alertes: Alerte[]
+  alertes: AlerteItem[]
   stats: AlertesStats | null
   loading: boolean
   error: string | null
@@ -45,41 +41,44 @@ interface UseAlertesReturn {
   // État WebSocket
   isConnected: boolean
 
+  // Filtres
+  filters: AlerteFilters
+
   // Actions
+  loadAlertes: () => Promise<void>
   marquerLue: (alerteId: string) => Promise<void>
-  actualiserAlertes: () => Promise<void>
+  marquerToutesLues: () => Promise<void>
+  setFilters: (filters: AlerteFilters) => void
   creerAlerteTest: (data: any) => Promise<void>
 
   // Utilitaires
   getNombreNonLues: () => number
-  getAlertesParImpact: (impact: string) => Alerte[]
+  getAlertesParImpact: (impact: string) => AlerteItem[]
 }
-
-/**
- * Configuration de l'API
- */
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-const WS_URL = API_BASE_URL.replace('http', 'ws')
 
 /**
  * Hook principal pour la gestion des alertes
  */
 export function useAlertes(): UseAlertesReturn {
-  // État des alertes
-  const [alertes, setAlertes] = useState<Alerte[]>([])
+  // États
+  const [alertes, setAlertes] = useState<AlerteItem[]>([])
   const [stats, setStats] = useState<AlertesStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [filters, setFilters] = useState<AlerteFilters>({})
 
   // État WebSocket
   const [isConnected, setIsConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>()
-
-  // Configuration
-  const reconnectDelay = 3000 // 3 secondes
-  const maxReconnectAttempts = 5
   const reconnectAttemptsRef = useRef(0)
+
+  const toast = useToast()
+
+  // Configuration WebSocket
+  const WS_URL = process.env.NEXT_PUBLIC_API_URL?.replace('http', 'ws') || 'ws://localhost:8000'
+  const maxReconnectAttempts = 5
+  const reconnectDelay = 3000
 
   /**
    * Récupère le token JWT depuis le localStorage
@@ -90,81 +89,54 @@ export function useAlertes(): UseAlertesReturn {
   }, [])
 
   /**
-   * Effectue une requête API authentifiée
-   */
-  const apiRequest = useCallback(async (
-    endpoint: string,
-    options: RequestInit = {}
-  ): Promise<Response> => {
-    const token = getAuthToken()
-
-    if (!token) {
-      throw new Error('Token d\'authentification manquant')
-    }
-
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-        ...options.headers
-      }
-    })
-
-    if (!response.ok) {
-      throw new Error(`Erreur API: ${response.status} ${response.statusText}`)
-    }
-
-    return response
-  }, [getAuthToken])
-
-  /**
    * Charge les alertes depuis l'API
    */
-  const chargerAlertes = useCallback(async () => {
+  const loadAlertes = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
 
-      const response = await apiRequest('/alertes?limit=50')
-      const data = await response.json()
+      const params = {
+        limit: 50,
+        ...filters
+      }
 
-      // Mapper les alertes avec le statut "lue"
-      const alertesAvecStatutLu = data.alertes.map((alerte: any) => ({
+      const response = await apiClient.alertes.list(params)
+
+      // Mapper les alertes avec statut "lue"
+      const alertesAvecStatutLu = response.alertes.map((alerte: any) => ({
         ...alerte,
         lue: alerte.date_traitement !== null
       }))
 
       setAlertes(alertesAvecStatutLu)
-    } catch (err) {
+    } catch (err: any) {
       console.error('Erreur chargement alertes:', err)
-      setError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setError(err.message || 'Erreur lors du chargement des alertes')
+      toast.error('Erreur', 'Impossible de charger les alertes')
     } finally {
       setLoading(false)
     }
-  }, [apiRequest])
+  }, [filters, toast])
 
   /**
    * Charge les statistiques des alertes
    */
-  const chargerStats = useCallback(async () => {
+  const loadStats = useCallback(async () => {
     try {
-      const response = await apiRequest('/alertes/stats')
-      const statsData = await response.json()
+      const statsData = await apiClient.alertes.stats()
       setStats(statsData)
-    } catch (err) {
+    } catch (err: any) {
       console.error('Erreur chargement stats:', err)
     }
-  }, [apiRequest])
+  }, [])
 
   /**
    * Marque une alerte comme lue
    */
   const marquerLue = useCallback(async (alerteId: string) => {
     try {
-      await apiRequest(`/alertes/${alerteId}/lire`, {
-        method: 'PATCH'
-      })
+      await apiClient.alertes.marquerLue(alerteId)
 
       // Mettre à jour l'état local
       setAlertes(prev => prev.map(alerte =>
@@ -174,39 +146,61 @@ export function useAlertes(): UseAlertesReturn {
       ))
 
       // Actualiser les stats
-      await chargerStats()
+      await loadStats()
 
       toast.success('Alerte marquée comme lue')
-    } catch (err) {
+    } catch (err: any) {
       console.error('Erreur marquer lue:', err)
-      toast.error('Erreur lors du marquage de l\'alerte')
+      toast.error('Erreur', 'Impossible de marquer l\'alerte comme lue')
     }
-  }, [apiRequest, chargerStats])
+  }, [loadStats, toast])
 
   /**
-   * Actualise les alertes
+   * Marque toutes les alertes comme lues
    */
-  const actualiserAlertes = useCallback(async () => {
-    await Promise.all([chargerAlertes(), chargerStats()])
-  }, [chargerAlertes, chargerStats])
+  const marquerToutesLues = useCallback(async () => {
+    const nonLues = alertes.filter(alerte => !alerte.lue)
+
+    if (nonLues.length === 0) {
+      toast.info('Aucune alerte non lue')
+      return
+    }
+
+    try {
+      await Promise.all(
+        nonLues.map(alerte => apiClient.alertes.marquerLue(alerte.id))
+      )
+
+      // Mettre à jour l'état local
+      setAlertes(prev => prev.map(alerte => ({ ...alerte, lue: true })))
+
+      // Actualiser les stats
+      await loadStats()
+
+      toast.success(`${nonLues.length} alerte(s) marquée(s) comme lues`)
+    } catch (err: any) {
+      console.error('Erreur marquer toutes lues:', err)
+      toast.error('Erreur', 'Impossible de marquer toutes les alertes')
+    }
+  }, [alertes, loadStats, toast])
 
   /**
    * Crée une alerte de test (admin uniquement)
    */
-  const creerAlerteTest = useCallback(async (data: any) => {
+  const creerAlerteTest = useCallback(async (data: {
+    titre: string
+    niveau_impact: string
+    contenu: string
+  }) => {
     try {
-      await apiRequest('/alertes/test', {
-        method: 'POST',
-        body: JSON.stringify(data)
-      })
-
+      await apiClient.alertes.creerTest(data)
       toast.success('Alerte de test créée')
-      await actualiserAlertes()
-    } catch (err) {
+      await loadAlertes()
+    } catch (err: any) {
       console.error('Erreur création alerte test:', err)
-      toast.error('Erreur lors de la création de l\'alerte de test')
+      toast.error('Erreur', 'Impossible de créer l\'alerte de test')
     }
-  }, [apiRequest, actualiserAlertes])
+  }, [loadAlertes, toast])
 
   /**
    * Traite un message de notification WebSocket
@@ -217,7 +211,7 @@ export function useAlertes(): UseAlertesReturn {
     switch (message.type) {
       case 'alerte':
         // Nouvelle alerte reçue
-        const nouvelleAlerte: Alerte = {
+        const nouvelleAlerte: AlerteItem = {
           id: message.alerte_id,
           titre: message.titre,
           niveau_impact: message.impact as any,
@@ -233,22 +227,24 @@ export function useAlertes(): UseAlertesReturn {
 
         // Notification toast selon l'impact
         if (message.impact === 'critique') {
-          toast.error(`🚨 ALERTE CRITIQUE: ${message.titre}`, {
-            autoClose: false, // Ne pas fermer automatiquement
-            className: 'toast-critique'
+          toast.error(`🚨 ALERTE CRITIQUE: ${message.titre}`, '', {
+            duration: 0, // Ne pas fermer automatiquement
+            action: {
+              label: 'Voir détails',
+              handler: () => {
+                // TODO: Naviguer vers l'alerte
+                console.log('Navigation vers alerte:', message.alerte_id)
+              }
+            }
           })
         } else if (message.impact === 'fort') {
-          toast.warning(`⚠️ ${message.titre}`, {
-            autoClose: 8000
-          })
+          toast.warning(`⚠️ ${message.titre}`, '', { duration: 8000 })
         } else {
-          toast.info(`ℹ️ ${message.titre}`, {
-            autoClose: 5000
-          })
+          toast.info(`ℹ️ ${message.titre}`, '', { duration: 5000 })
         }
 
         // Mettre à jour les stats
-        chargerStats()
+        loadStats()
         break
 
       case 'info':
@@ -266,7 +262,7 @@ export function useAlertes(): UseAlertesReturn {
       default:
         console.log('Type de message non géré:', message.type)
     }
-  }, [chargerStats])
+  }, [loadStats, toast])
 
   /**
    * Établit la connexion WebSocket
@@ -335,7 +331,7 @@ export function useAlertes(): UseAlertesReturn {
       console.error('Erreur création WebSocket:', err)
       setError('Impossible de créer la connexion WebSocket')
     }
-  }, [getAuthToken, traiterMessageWebSocket])
+  }, [getAuthToken, traiterMessageWebSocket, WS_URL, maxReconnectAttempts, reconnectDelay, toast])
 
   /**
    * Ferme la connexion WebSocket
@@ -363,7 +359,7 @@ export function useAlertes(): UseAlertesReturn {
   /**
    * Utilitaire : Alertes par niveau d'impact
    */
-  const getAlertesParImpact = useCallback((impact: string): Alerte[] => {
+  const getAlertesParImpact = useCallback((impact: string): AlerteItem[] => {
     return alertes.filter(alerte => alerte.niveau_impact === impact)
   }, [alertes])
 
@@ -371,7 +367,7 @@ export function useAlertes(): UseAlertesReturn {
   useEffect(() => {
     const initAsync = async () => {
       // Charger les données initiales
-      await actualiserAlertes()
+      await Promise.all([loadAlertes(), loadStats()])
 
       // Connecter WebSocket si authentifié
       const token = getAuthToken()
@@ -386,7 +382,7 @@ export function useAlertes(): UseAlertesReturn {
     return () => {
       deconnecterWebSocket()
     }
-  }, [actualiserAlertes, getAuthToken, connecterWebSocket, deconnecterWebSocket])
+  }, [loadAlertes, loadStats, getAuthToken, connecterWebSocket, deconnecterWebSocket])
 
   // Effet : Reconnexion WebSocket si token change
   useEffect(() => {
@@ -397,61 +393,28 @@ export function useAlertes(): UseAlertesReturn {
   }, [getAuthToken, isConnected, connecterWebSocket])
 
   return {
-    // État
+    // État des alertes
     alertes,
     stats,
     loading,
     error,
+
+    // État WebSocket
     isConnected,
 
+    // Filtres
+    filters,
+
     // Actions
+    loadAlertes,
     marquerLue,
-    actualiserAlertes,
+    marquerToutesLues,
+    setFilters,
     creerAlerteTest,
 
     // Utilitaires
     getNombreNonLues,
     getAlertesParImpact
-  }
-}
-
-/**
- * Hook pour badge de notification avec nombre non lues
- */
-export function useNotificationBadge() {
-  const { stats, getNombreNonLues } = useAlertes()
-
-  return {
-    nombreNonLues: getNombreNonLues(),
-    critiquesActives: stats?.critiques_actives || 0,
-    afficherBadge: getNombreNonLues() > 0
-  }
-}
-
-/**
- * Hook pour les actions rapides sur les alertes
- */
-export function useAlertesActions() {
-  const { marquerLue, actualiserAlertes } = useAlertes()
-
-  const marquerToutesLues = useCallback(async (alertes: Alerte[]) => {
-    const nonLues = alertes.filter(alerte => !alerte.lue)
-
-    try {
-      await Promise.all(
-        nonLues.map(alerte => marquerLue(alerte.id))
-      )
-
-      toast.success(`${nonLues.length} alerte(s) marquée(s) comme lue(s)`)
-    } catch (err) {
-      toast.error('Erreur lors du marquage des alertes')
-    }
-  }, [marquerLue])
-
-  return {
-    marquerLue,
-    marquerToutesLues,
-    actualiserAlertes
   }
 }
 
