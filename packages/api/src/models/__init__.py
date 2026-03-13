@@ -8,6 +8,10 @@ from .succession import (
     Succession, Heritier, ActifSuccessoral, PassifSuccessoral,
     StatutTraitement, LienParente, TypeActif
 )
+from .veille import (
+    VeilleRule, Alerte, HistoriqueVeille,
+    TypeSource, NiveauImpact, StatutAlerte
+)
 
 __all__ = [
     "Base",
@@ -23,4 +27,10 @@ __all__ = [
     "StatutTraitement",
     "LienParente",
     "TypeActif",
+    "VeilleRule",
+    "Alerte",
+    "HistoriqueVeille",
+    "TypeSource",
+    "NiveauImpact",
+    "StatutAlerte",
 ]

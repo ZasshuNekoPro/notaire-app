@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 import redis.asyncio as redis
 
 from .models.base import Base
-from .routers import auth, users, estimations
+from .routers import auth, users, estimations, successions, veille, notifications, alertes
+from .scheduler import demarrer_scheduler_veille, arreter_scheduler_veille
 
 
 # ============================================================
@@ -100,7 +101,14 @@ async def lifespan(app: FastAPI):
         await redis_client.ping()
         await redis_client.close()
 
-        print("✅ Connexions DB et Redis établies")
+        # Démarrer le scheduler de veille automatique
+        try:
+            await demarrer_scheduler_veille()
+            print("✅ Scheduler de veille démarré")
+        except Exception as e:
+            print(f"⚠️ Erreur démarrage scheduler veille: {e}")
+
+        print("✅ Connexions DB, Redis et scheduler établis")
 
     except Exception as e:
         print(f"❌ Erreur de connexion: {e}")
@@ -109,6 +117,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    try:
+        await arreter_scheduler_veille()
+        print("✅ Scheduler de veille arrêté")
+    except Exception as e:
+        print(f"⚠️ Erreur arrêt scheduler: {e}")
+
     await engine.dispose()
     print("✅ Connexions fermées proprement")
 
@@ -129,7 +143,7 @@ app = FastAPI(
     - 📊 **Estimation immobilière** : Données DVF + IA
     - ⚖️ **Succession** : Calculs fiscaux automatisés
     - 📄 **RAG juridique** : Assistant rédaction d'actes
-    - 🚨 **Alertes** : Veille légale temps réel
+    - 🚨 **Veille automatique** : Surveillance DVF, Légifrance, BOFIP
 
     ### Authentification
     Utilisez un token Bearer JWT dans le header `Authorization: Bearer <token>`.
@@ -217,6 +231,22 @@ estimations.router.dependency_overrides.update({
     "get_redis": get_redis
 })
 
+successions.router.dependency_overrides.update({
+    "get_db": get_db
+})
+
+veille.router.dependency_overrides.update({
+    "get_db": get_db
+})
+
+notifications.router.dependency_overrides.update({
+    "get_db": get_db
+})
+
+alertes.router.dependency_overrides.update({
+    "get_db": get_db
+})
+
 # Enregistrement des routers
 app.include_router(
     auth.router,
@@ -236,11 +266,32 @@ app.include_router(
     tags=["Estimation immobilière"]
 )
 
+app.include_router(
+    successions.router,
+    prefix="/successions",
+    tags=["Succession"]
+)
+
+app.include_router(
+    veille.router,
+    prefix="/veille",
+    tags=["Veille automatique"]
+)
+
+app.include_router(
+    notifications.router,
+    tags=["WebSocket Notifications"]
+)
+
+app.include_router(
+    alertes.router,
+    prefix="/alertes",
+    tags=["Alertes temps réel"]
+)
+
 # TODO: Ajouter d'autres routers quand ils seront implémentés
 # app.include_router(dossiers.router, prefix="/dossiers", tags=["Dossiers"])
-# app.include_router(successions.router, prefix="/successions", tags=["Succession"])
 # app.include_router(juridique.router, prefix="/juridique", tags=["RAG Juridique"])
-# app.include_router(alertes.router, prefix="/alertes", tags=["Alertes"])
 
 
 # ============================================================
@@ -263,6 +314,10 @@ async def root():
             "auth": "/auth/",
             "users": "/users/",
             "estimations": "/estimations/",
+            "successions": "/successions/",
+            "veille": "/veille/",
+            "alertes": "/alertes/",
+            "websocket": "/ws/notifications",
             "docs": "/docs",
             "health": "/health"
         },
