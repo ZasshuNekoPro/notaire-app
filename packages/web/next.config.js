@@ -3,9 +3,12 @@ const nextConfig = {
   // Configuration pour Docker standalone
   output: 'standalone',
 
-  // Désactiver complètement la génération statique
-  distDir: '.next',
-  trailingSlash: false,
+  // Debug mode pour investigation SSR
+  logging: {
+    fetches: {
+      fullUrl: true,
+    },
+  },
 
   // Configuration des variables d'environnement
   env: {
