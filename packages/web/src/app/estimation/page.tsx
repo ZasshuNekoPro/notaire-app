@@ -4,7 +4,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import dynamic from 'next/dynamic'
+import dynamicImport from 'next/dynamic'
 import { AppLayout } from '@/components/layout'
 import {
   Card,
@@ -17,8 +17,11 @@ import {
 } from '@/components/ui'
 import { useEstimation } from '@/hooks/useEstimation'
 
+// Force dynamic rendering to avoid prerendering errors
+export const dynamic = 'force-dynamic'
+
 // Import dynamique de la carte pour éviter les erreurs SSR
-const MapComponent = dynamic(() => import('../../../components/map/EstimationMap'), {
+const MapComponent = dynamicImport(() => import('../../components/map/EstimationMap'), {
   ssr: false,
   loading: () => (
     <div className="h-64 bg-gray-100 rounded-lg flex items-center justify-center">

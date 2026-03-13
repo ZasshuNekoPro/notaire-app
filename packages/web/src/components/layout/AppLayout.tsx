@@ -142,6 +142,7 @@ export function AppLayout({ children }: AppLayoutProps) {
    * Filtre les éléments de navigation selon les rôles
    */
   const filterNavItems = (items: NavItem[]) => {
+    if (!items || !hasAnyRole) return []
     return items.filter(item => {
       if (!item.requiredRoles) return true
       return hasAnyRole(item.requiredRoles)
@@ -149,7 +150,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   }
 
   const filteredMainNav = filterNavItems(navigationItems)
-  const filteredAdminNav = filterNavItems(adminNavigationItems)
+  const filteredAdminNav = filterNavItems(adminNavigationItems) || []
 
   /**
    * Détermine si un lien est actif

@@ -3,6 +3,9 @@
  */
 'use client'
 
+// Force dynamic rendering to avoid prerendering errors
+export const dynamic = 'force-dynamic'
+
 import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'

@@ -2,6 +2,10 @@
  * Layout racine Next.js avec providers React
  */
 import './globals.css'
+
+// Force dynamic rendering for all pages
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
 import { AuthProvider } from '@/lib/auth-context'
 import { ToastProvider } from '@/components/ui/Toast'
 

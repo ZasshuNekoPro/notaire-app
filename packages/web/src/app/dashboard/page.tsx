@@ -3,6 +3,9 @@
  */
 'use client'
 
+// Force dynamic rendering to avoid prerendering errors
+export const dynamic = 'force-dynamic'
+
 import { useEffect } from 'react'
 import { AppLayout } from '@/components/layout'
 import {
